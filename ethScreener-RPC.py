@@ -57,6 +57,10 @@ handler = ETH_Handler(web3)
 
 latest_block = handler.get_latest_block()
 
+# True only if the config file is new.
+if (configData['latest_block_checked'] == -1):
+    configData['latest_block_checked'] = latest_block
+
 print(f"{latest_block['number'] - configData['latest_block_checked']} blocks to check")
 
 nonTokens = pd.DataFrame(columns=['address'])
