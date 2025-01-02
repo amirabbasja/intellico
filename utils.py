@@ -5,6 +5,7 @@ import json
 import pandas as pd
 from psycopg2 import Error
 import psycopg2
+from web3 import Web3
     
 class dbUtils:
     """
@@ -424,3 +425,98 @@ class ConfigManager:
             bool: True if successful, False otherwise
         """
         return self.save_config(self.default_config)
+
+class ETH_Handler:
+    def __init__(self, handle:Web3):
+        """
+        This class is used to handle Ethereum blockchain interactions.
+        
+        Args:
+            handle (Web3): Web3 object to interact with the blockchain. tested with alchemy API.
+        """
+        self.handle = handle
+        self.ERC20_ABI = [ # basic Token Information for ethereum
+            {"inputs": [], "name": "name", "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [], "name": "symbol", "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [], "name": "decimals", "outputs": [{"type": "uint8"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [], "name": "totalSupply", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+            
+            # Balance and allowance
+            {"inputs": [{"type": "address"}], "name": "balanceOf", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+            {"inputs": [{"type": "address"}, {"type": "address"}], "name": "allowance", "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
+            
+            # Transfer events
+            {"anonymous": False, "inputs": [{"indexed": True, "type": "address"}, {"indexed": True, "type": "address"}, {"indexed": False, "type": "uint256"}], "name": "Transfer", "type": "event"},
+            {"anonymous": False, "inputs": [{"indexed": True, "type": "address"}, {"indexed": True, "type": "address"}, {"indexed": False, "type": "uint256"}], "name": "Approval", "type": "event"}
+        ]
+    
+    def get_latest_block(self):
+        """
+        Get the latest block number from the blockchain.
+        
+        Returns:
+            int: Latest block number
+        """
+        try:
+            if self.handle.is_connected():
+                # Get the latest block
+                return self.handle.eth.get_block('latest')
+                
+            else:
+                raise Exception("Failed to connect to the Ethereum node. Are you sure you have entered the API key correctly?")
+        except Exception as e:
+            print(f"Error getting latest block: {e}")
+            return 0
+    
+    def get_token_details(self, token_address):
+        """
+        Get token details from the blockchain.
+        
+        Args:
+            token_address (str): Address of the token contract
+        
+        Returns:
+            Dict: Token information (name, symbol, decimals, total_supply)
+        """
+        # Connect to Ethereum node
+        web3 = self.handle
+        
+        # Convert to checksum address
+        token_address = web3.to_checksum_address(token_address)
+        
+        # Validate address
+        if not web3.is_address(token_address):
+            raise Exception("Invalid address")
+        
+        if  len(web3.eth.get_code(token_address)) != 0:
+            try:
+                # Create contract instance
+                contract = web3.eth.contract(address=token_address, abi = self.ERC20_ABI)
+                
+                # Get basic token information
+                token_info = {
+                    'address': token_address,
+                    'name': contract.functions.name().call(),
+                    'symbol': contract.functions.symbol().call(),
+                    'decimals': contract.functions.decimals().call(),
+                    'total_supply': contract.functions.totalSupply().call()
+                }
+                
+                # Get contract code size (to verify it's a contract)
+                token_info['is_contract'] = "True"
+                
+                return token_info
+            except:
+                token_info = {
+                    'address': token_address,
+                    'name': "-",
+                    'symbol': "-",
+                    'decimals': "-",
+                    'total_supply': "-"
+                }
+                token_info['is_contract'] = "True"
+                return token_info
+        else:
+            # Not a conteract
+            return None
+            
