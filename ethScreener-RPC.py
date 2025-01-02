@@ -97,14 +97,14 @@ try:
                         nonTokens = pd.concat([nonTokens, pd.DataFrame([contract_address], columns=['address'])])
                         pass
         configData['latest_block_checked'] = i
-        configObj.save_config(appInfo, configData)
+        configObj.save_config(configData)
         nonTokens.to_csv("nonTokens.csv") # DELETE
 
         time.sleep(0.02)
     
     # Update the latest block checked
     configData['latest_block_checked'] = i
-    configObj.save_config(appInfo, configData)
+    configObj.save_config(configData)
     print("Database updated successfully")
     
     # DELETE
@@ -112,6 +112,6 @@ try:
     
 except Exception as e:
     configData['latest_block_checked'] =  i
-    configObj.save_config(appInfo, configData)
+    configObj.save_config(configData)
     print(f"Error in block {i}")
     print(f"Error: {e}")
