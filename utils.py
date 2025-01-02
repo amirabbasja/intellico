@@ -326,7 +326,7 @@ class dbUtils:
         self._close()
 
 class ConfigManager:
-    def __init__(self, configFilePath:str, default_config={"appName":"screener"}):
+    def __init__(self, configFilePath:str, default_config={"appName":"screener", "latest_block_checked": -1}):
         """
         This class is used to load the configuration file and the environment variables.
         
@@ -334,6 +334,8 @@ class ConfigManager:
             configFilePath (str): Path to the config file (e.g. config.json)
             default_config (Dict, optional): Default configuration to use if file doesn't exist
         """
+        
+        self
         
         # Set object parameters
         self.configPath = configFilePath
