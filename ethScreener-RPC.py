@@ -74,8 +74,10 @@ try:
                 tx_receipt = web3.eth.get_transaction_receipt(tx['hash'])
                 contract_address = tx_receipt['contractAddress']
                 contract_code = web3.eth.get_code(contract_address)
-                if contract_code != '0x':
+                if contract_code != '0x' and contract_code != None:
                     _details = handler.get_token_details(contract_address)
+                    print(_details)
+                    print(contract_address)
                     if _details["name"] != "-":
                         _data = {
                             'address': _details["address"],
