@@ -1,8 +1,9 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import os
 from dotenv import load_dotenv 
 import json
 import pandas as pd
+import requests
 from psycopg2 import Error
 import psycopg2
 from web3 import Web3
@@ -427,6 +428,91 @@ class ConfigManager:
             bool: True if successful, False otherwise
         """
         return self.save_config(self.default_config)
+
+class SOLANA_Handler:
+    def __init__(self, api_key: str = None):
+        """
+        Initialize the Solana block monitor with Alchemy API key.
+        
+        Args:
+            api_key (str, optional): Alchemy API key. If not provided, will look for ALCHEMY_API_KEY env variable.
+        """
+        self.api_key = api_key or os.getenv('ALCHEMY_API_KEY')
+        if not self.api_key:
+            raise ValueError("API key must be provided or set in ALCHEMY_API_KEY environment variable")
+            
+        self.base_url = f"https://solana-mainnet.g.alchemy.com/v2/{self.api_key}"
+        self.headers = {
+            "Content-Type": "application/json"
+        }
+
+    def _make_request(self, method: str, params: list = None):
+        """
+        Make a JSON-RPC request to Alchemy API.
+        
+        Args:
+            method (str): The RPC method to call
+            params (list, optional): Parameters for the RPC method
+            
+        Returns:
+            Optional[Dict[str, Any]]: The response data or None if request failed
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params or []
+        }
+        
+        try:
+            response = requests.post(self.base_url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed (solana) for method {method}: {e}")
+            return None
+
+    def get_latest_block(self):
+        """
+        Get the latest Solana block height.
+        
+        Returns:
+            Optional[int]: The latest block height or None if request failed
+        """
+        data = self._make_request("getBlockHeight")
+        if data and "result" in data:
+            return data["result"]
+        return None
+
+    def get_block_info(self, block_number: int):
+        """
+        Get detailed information about a specific block.
+        
+        Args:
+            block_number (int): The block number to get information for
+            
+        Returns:
+            Optional[Dict[str, Any]]: Block information or None if request failed
+        """
+        data = self._make_request("getBlock", [block_number, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+        if data and "result" in data:
+            return data["result"]
+        return None
+
+    def get_block_time(self, block_number: int):
+        """
+        Get the timestamp of a specific block.
+        
+        Args:
+            block_number (int): The block number to get timestamp for
+            
+        Returns:
+            Optional[int]: Block timestamp or None if request failed
+        """
+        data = self._make_request("getBlockTime", [block_number])
+        if data and "result" in data:
+            return data["result"]
+        return None
 
 class ETH_Handler:
     def __init__(self, handle:Web3):
