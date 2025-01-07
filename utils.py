@@ -1,13 +1,114 @@
-from typing import Any, Dict, Optional
-import os
+from typing import Any, Dict, Optional, List
+import os, csv
 from dotenv import load_dotenv 
 import json
 import pandas as pd
 import requests
+from requests.exceptions import RequestException
 from psycopg2 import Error
 import psycopg2
 from web3 import Web3
-    
+import time
+from datetime import datetime
+
+class APIClient:
+    def __init__(self, base_url: str, api_key: Optional[str] = None):
+        """
+        Initialize API client with base URL and optional API key
+        
+        Args:
+            base_url (str): Base URL of the API
+            api_key (str, optional): API key for authentication
+        """
+        self.base_url = base_url.rstrip('/')
+        self.session = requests.Session()
+        
+        # Set up default headers
+        self.headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        # Add API key if provided
+        if api_key:
+            self.headers['Authorization'] = f'Bearer {api_key}'
+            
+        self.session.headers.update(self.headers)
+
+    def get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
+        """
+        Make GET request to API endpoint
+        
+        Args:
+            endpoint (str): API endpoint
+            params (dict, optional): Query parameters
+            
+        Returns:
+            dict: Response data
+        """
+        return self._make_request('GET', endpoint, params=params)
+
+    def post(self, endpoint: str, data: Dict) -> Dict:
+        """
+        Make POST request to API endpoint
+        
+        Args:
+            endpoint (str): API endpoint
+            data (dict): Data to send
+            
+        Returns:
+            dict: Response data
+        """
+        return self._make_request('POST', endpoint, json=data)
+
+    def put(self, endpoint: str, data: Dict) -> Dict:
+        """
+        Make PUT request to API endpoint
+        """
+        return self._make_request('PUT', endpoint, json=data)
+
+    def delete(self, endpoint: str) -> Dict:
+        """
+        Make DELETE request to API endpoint
+        """
+        return self._make_request('DELETE', endpoint)
+
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict:
+        """
+        Make HTTP request with retry logic and error handling
+        """
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                url = f"{self.base_url}/{endpoint.lstrip('/')}"
+                response = self.session.request(method, url, **kwargs)
+                
+                # Raise error for bad status codes
+                response.raise_for_status()
+                
+                return response.json()
+                
+            except RequestException as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise Exception(f"Request failed after {max_retries} attempts: {str(e)}")
+                    
+                # Handle rate limiting
+                if hasattr(e.response, 'status_code') and e.response.status_code == 429:
+                    # Get retry-after header or use default delay
+                    retry_after = int(e.response.headers.get('Retry-After', retry_delay))
+                    time.sleep(retry_after)
+                else:
+                    # Exponential backoff
+                    time.sleep(retry_delay * (2 ** attempt))
+                    
+            except ValueError as e:
+                raise Exception(f"Invalid JSON response: {str(e)}")
+                
+            except Exception as e:
+                raise Exception(f"Unexpected error: {str(e)}")
+
 class dbUtils:
     """
     Utility class to handle database tasks (Works with postgreSQL).
@@ -484,17 +585,26 @@ class SOLANA_Handler:
             return data["result"]
         return None
 
-    def get_block_info(self, block_number: int):
+    def get_block_info(self, block_number: int, transaction_details: str = "full"):
         """
         Get detailed information about a specific block.
         
         Args:
             block_number (int): The block number to get information for
+            transaction_details (str, optional): Level of transaction details to include.
+                full: Include all transaction details (Very heavy).
+                signatures: Include only transaction signatures (Much lighter).
+                none: Exclude transaction details and return block summary.
             
         Returns:
             Optional[Dict[str, Any]]: Block information or None if request failed
         """
-        data = self._make_request("getBlock", [block_number, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+        
+        # Check parameters
+        if transaction_details not in ["full", "signatures", "none"]:
+            raise ValueError("Invalid transaction_details. Must be 'full', 'signatures', or 'none'")
+        
+        data = self._make_request("getBlock", [block_number, {"encoding": "json", "transactionDetails": "signatures", "maxSupportedTransactionVersion": 0}])
         if data and "result" in data:
             return data["result"]
         return None
@@ -523,7 +633,7 @@ class ETH_Handler:
             handle (Web3): Web3 object to interact with the blockchain. tested with alchemy API.
         """
         self.handle = handle
-        self.ERC20_ABI = [ # basic Token Information for ethereum
+        self.ERC20_ABI = [ # Basic Token Information for Ethereum
             {"inputs": [], "name": "name", "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"},
             {"inputs": [], "name": "symbol", "outputs": [{"type": "string"}], "stateMutability": "view", "type": "function"},
             {"inputs": [], "name": "decimals", "outputs": [{"type": "uint8"}], "stateMutability": "view", "type": "function"},
@@ -537,6 +647,35 @@ class ETH_Handler:
             {"anonymous": False, "inputs": [{"indexed": True, "type": "address"}, {"indexed": True, "type": "address"}, {"indexed": False, "type": "uint256"}], "name": "Transfer", "type": "event"},
             {"anonymous": False, "inputs": [{"indexed": True, "type": "address"}, {"indexed": True, "type": "address"}, {"indexed": False, "type": "uint256"}], "name": "Approval", "type": "event"}
         ]
+        
+        self.ERC20_ABI_Minimal = [ # Basic Token Information for Ethereum (Minimal)
+            {"constant": True,"inputs": [],"name": "symbol","outputs": [{"name": "", "type": "string"}],"type": "function"},
+            {"constant": True,"inputs": [],"name": "decimals","outputs": [{"name": "", "type": "uint8"}],"type": "function"}
+        ]
+
+        self.PAIR_ABI = [ # Uniswap V2 Pair ABI (minimal)
+            {"constant": True,"inputs": [],"name": "token0","outputs": [{"name": "", "type": "address"}],"type": "function"},
+            {"constant": True,"inputs": [],"name": "token1","outputs": [{"name": "", "type": "address"}],"type": "function"},
+            {"constant": True,"inputs": [],"name": "getReserves","outputs": [{"name": "_reserve0", "type": "uint112"},{"name": "_reserve1", "type": "uint112"},{"name": "_blockTimestampLast", "type": "uint32"}],"type": "function"}
+        ]
+        
+        self.FACTORY_ABI = [ # Uniswap V2 Factory ABI (minimal for PairCreated event) 
+            {
+                "anonymous": False,
+                "inputs": [
+                    {"indexed": True, "name": "token0", "type": "address"},
+                    {"indexed": True, "name": "token1", "type": "address"},
+                    {"indexed": False, "name": "pair", "type": "address"},
+                    {"indexed": False, "name": "nil", "type": "uint256"}
+                ],
+                "name": "PairCreated",
+                "type": "event"
+            }
+        ]
+        
+        # Contract address in charge of deploying pairs
+        self.uniswap_Factory_V2 = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+        self.uniswap_Factory_V3 = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
     
     def get_latest_block(self):
         """
@@ -555,6 +694,231 @@ class ETH_Handler:
         except Exception as e:
             print(f"Error getting latest block: {e}")
             return 0
+    
+    def get_pair_info(self, pair_address: str) -> Dict:
+        """
+        Get detailed information about a Uniswap V2 pair's tokens.
+        
+        Args:
+            web3obj: A web3 object (using web3 package).
+            node_url: Ethereum node URL
+        
+        Returns:
+            Dictionary containing pair information
+        """
+        try:
+            # Connect to Ethereum network
+            w3 = self.handle
+
+            # Convert pair address to checksum format
+            pair_address = Web3.to_checksum_address(pair_address)
+            
+            # Initialize pair contract
+            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            
+            # Get token addresses
+            token0_address = pair_contract.functions.token0().call()
+            token1_address = pair_contract.functions.token1().call()
+            
+            # Get reserves
+            reserves = pair_contract.functions.getReserves().call()
+            
+            # Initialize token contracts
+            token0_contract = w3.eth.contract(address=token0_address, abi=self.ERC20_ABI)
+            token1_contract = w3.eth.contract(address=token1_address, abi=self.ERC20_ABI)
+            
+            # Get token information
+            token0_symbol = token0_contract.functions.symbol().call()
+            token1_symbol = token1_contract.functions.symbol().call()
+            token0_decimals = token0_contract.functions.decimals().call()
+            token1_decimals = token1_contract.functions.decimals().call()
+            
+            return {
+                "pair_address": pair_address,
+                "token0": {
+                    "address": token0_address,
+                    "symbol": token0_symbol,
+                    "decimals": token0_decimals,
+                    "reserve": reserves[0] / 10**token0_decimals
+                },
+                "token1": {
+                    "address": token1_address,
+                    "symbol": token1_symbol,
+                    "decimals": token1_decimals,
+                    "reserve": reserves[1] / 10**token1_decimals
+                }
+            }
+            
+        except Exception as e:
+            raise Exception(f"Error fetching pair information: {str(e)}")
+
+    def get_token_price_from_pair(self, token_address: str,pair_address: str) -> Dict[str, Any]:
+        """
+        Get token price directly from a Uniswap V2 pair on Ethereum.
+        
+        Args:
+            token_address: Address of the token to get price for
+            pair_address: Address of the Uniswap V2 pair
+            node_url: Ethereum node URL
+        
+        Returns:
+            Dictionary containing price information
+        """
+        try:
+            # Connect to Ethereum network
+            w3 = self.handle
+            if not w3.is_connected():
+                raise Exception("Failed to connect to Ethereum network")
+
+            # Convert addresses to checksum format
+            token_address = Web3.to_checksum_address(token_address)
+            pair_address = Web3.to_checksum_address(pair_address)
+            
+            # Initialize pair contract
+            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            
+            # Get tokens in pair
+            token0_address = pair_contract.functions.token0().call()
+            token1_address = pair_contract.functions.token1().call()
+            
+            # Get reserves
+            reserves = pair_contract.functions.getReserves().call()
+            reserve0, reserve1 = reserves[0], reserves[1]
+            
+            # Initialize token contracts
+            token0_contract = w3.eth.contract(address=token0_address, abi=self.ERC20_ABI)
+            token1_contract = w3.eth.contract(address=token1_address, abi=self.ERC20_ABI)
+            
+            # Get decimals for both tokens
+            decimals0 = token0_contract.functions.decimals().call()
+            decimals1 = token1_contract.functions.decimals().call()
+            
+            # Get token symbols
+            symbol0 = token0_contract.functions.symbol().call()
+            symbol1 = token1_contract.functions.symbol().call()
+            
+            # Calculate price based on which token is which in the pair
+            if token0_address.lower() == token_address.lower():
+                # If our token is token0, price = reserve1/reserve0
+                price = (reserve1 / 10**decimals1) / (reserve0 / 10**decimals0)
+                base_token = token1_address
+            else:
+                # If our token is token1, price = reserve0/reserve1
+                price = (reserve0 / 10**decimals0) / (reserve1 / 10**decimals1)
+                base_token = token0_address
+                
+            return {
+                "price": price,
+                "base_token": base_token,
+                "symbols": {
+                    "symbol0": symbol0,
+                    "symbol1": symbol1,
+                },
+                "reserves": {
+                    "reserve0": reserve0,
+                    "reserve1": reserve1
+                },
+                "decimals": {
+                    "token0": decimals0,
+                    "token1": decimals1
+                },
+                "formatted_price": f"{price:.8f}"
+            }
+            
+        except Exception as e:
+            raise Exception(f"Error fetching on-chain price: {str(e)}")
+
+    def get_historical_prices(self, pair_address: str,token_address: str,from_block: int,to_block: int) -> List[Dict[str, Any]]:
+        """
+        Get historical token prices from Uniswap V2 swap events.
+        
+        Args:
+            pair_address: Address of the Uniswap V2 pair
+            token_address: Address of the token to get prices for
+            from_block: Starting block number
+            to_block: Ending block number
+            node_url: Ethereum node URL
+        
+        Returns:
+            List of dictionaries containing historical price data
+        """
+        try:
+            # Connect to Ethereum network
+            w3 = self.handle
+            if not w3.is_connected():
+                raise Exception("Failed to connect to Ethereum network")
+
+            # Convert addresses to checksum format
+            pair_address = Web3.to_checksum_address(pair_address)
+            token_address = Web3.to_checksum_address(token_address)
+            
+            # Initialize pair contract
+            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            
+            # Get token addresses in pair
+            token0_address = pair_contract.functions.token0().call()
+            token1_address = pair_contract.functions.token1().call()
+            
+            # Initialize token contracts
+            token0_contract = w3.eth.contract(address=token0_address, abi=self.ERC20_ABI)
+            token1_contract = w3.eth.contract(address=token1_address, abi=self.ERC20_ABI)
+            
+            # Get decimals and symbols
+            decimals0 = token0_contract.functions.decimals().call()
+            decimals1 = token1_contract.functions.decimals().call()
+            symbol0 = token0_contract.functions.symbol().call()
+            symbol1 = token1_contract.functions.symbol().call()
+            
+            # Determine which token is which in the pair
+            is_token0 = token_address.lower() == token0_address.lower()
+            base_decimals = decimals1 if is_token0 else decimals0
+            token_decimals = decimals0 if is_token0 else decimals1
+            
+            # Get swap events
+            swap_filter = pair_contract.events.Swap.create_filter(
+                fromBlock=from_block,
+                toBlock=to_block
+            )
+            events = swap_filter.get_all_entries()
+            
+            # Process events
+            prices = []
+            for event in events:
+                # Get event data
+                amount0In = event['args']['amount0In']
+                amount1In = event['args']['amount1In']
+                amount0Out = event['args']['amount0Out']
+                amount1Out = event['args']['amount1Out']
+                
+                # Calculate amounts considering decimals
+                if is_token0:
+                    token_amount = (amount0In - amount0Out) / (10 ** token_decimals)
+                    base_amount = (amount1Out - amount1In) / (10 ** base_decimals)
+                else:
+                    token_amount = (amount1In - amount1Out) / (10 ** token_decimals)
+                    base_amount = (amount0Out - amount0In) / (10 ** base_decimals)
+                
+                # Calculate price only if there was actual movement
+                if token_amount != 0 and base_amount != 0:
+                    price = abs(base_amount / token_amount)
+                    
+                    # Get block timestamp
+                    block = w3.eth.get_block(event['blockNumber'])
+                    timestamp = datetime.fromtimestamp(block['timestamp'])
+                    
+                    prices.append({
+                        'block_number': event['blockNumber'],
+                        'timestamp': timestamp.isoformat(),
+                        'price': price,
+                        'token_amount': abs(token_amount),
+                        'base_amount': abs(base_amount),
+                        'transaction_hash': event['transactionHash'].hex()
+                    })
+            
+            return prices
+            
+        except Exception as e:
+            raise Exception(f"Error fetching historical prices: {str(e)}")
     
     def get_token_details(self, token_address):
         """
@@ -607,4 +971,3 @@ class ETH_Handler:
         else:
             # Not a conteract
             return None
-            
