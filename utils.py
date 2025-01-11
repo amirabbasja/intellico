@@ -653,11 +653,23 @@ class ETH_Handler:
             {"constant": True,"inputs": [],"name": "decimals","outputs": [{"name": "", "type": "uint8"}],"type": "function"}
         ]
 
-        self.PAIR_ABI = [ # Uniswap V2 Pair ABI (minimal)
+        self.UNIV2_ROUTER_ABI = [ # Uniswap V2 Pair ABI (minimal)
             {"constant": True,"inputs": [],"name": "token0","outputs": [{"name": "", "type": "address"}],"type": "function"},
             {"constant": True,"inputs": [],"name": "token1","outputs": [{"name": "", "type": "address"}],"type": "function"},
             {"constant": True,"inputs": [],"name": "getReserves","outputs": [{"name": "_reserve0", "type": "uint112"},{"name": "_reserve1", "type": "uint112"},{"name": "_blockTimestampLast", "type": "uint32"}],"type": "function"}
         ]
+        
+        with open("./resources/ABIs/UNI_V2_ROUTER02.abi", 'r') as abi_file:
+            abi_content = abi_file.read()
+            self.UNIV2_ROUTER_ABI = json.loads(abi_content)
+        
+        with open("./resources/ABIs/UNI_V2_PAIR.abi", 'r') as abi_file:
+            abi_content = abi_file.read()
+            self.UNIV2_PAIR_ABI = json.loads(abi_content)
+            
+        with open("./resources/ABIs/UNI_V3_POOL.abi", 'r') as abi_file:
+            abi_content = abi_file.read()
+            self.UNIV3_POOL_ABI = json.loads(abi_content)
         
         self.FACTORY_ABI = [ # Uniswap V2 Factory ABI (minimal for PairCreated event) 
             {
@@ -672,7 +684,8 @@ class ETH_Handler:
                 "type": "event"
             }
         ]
-        
+
+
         # Contract address in charge of deploying pairs
         self.uniswap_Factory_V2 = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
         self.uniswap_Factory_V3 = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
@@ -697,7 +710,7 @@ class ETH_Handler:
     
     def get_pair_info(self, pair_address: str) -> Dict:
         """
-        Get detailed information about a Uniswap V2 pair's tokens.
+        Get detailed information about a Uniswap V2 or V3 pairs.
         
         Args:
             web3obj: A web3 object (using web3 package).
@@ -713,15 +726,43 @@ class ETH_Handler:
             # Convert pair address to checksum format
             pair_address = Web3.to_checksum_address(pair_address)
             
-            # Initialize pair contract
-            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            try:       
+                # Try withUniswap V2 ABI
+                pair_contract = w3.eth.contract(address=pair_address, abi=self.UNIV2_ROUTER_ABI)
             
-            # Get token addresses
-            token0_address = pair_contract.functions.token0().call()
-            token1_address = pair_contract.functions.token1().call()
+                # Get token addresses
+                token0_address = pair_contract.functions.token0().call()
+                token1_address = pair_contract.functions.token1().call()
+            except:
+                try:
+                    # Try withUniswap V3 ABI
+                    pair_contract = w3.eth.contract(address=pair_address, abi=self.UNIV3_POOL_ABI)
+                
+                    # Get token addresses
+                    token0_address = pair_contract.functions.token0().call()
+                    token1_address = pair_contract.functions.token1().call()
+                except:
+                    raise Exception("Not a uniswap V2 or V3 pair. are you sure what you have entered is for a conteract address?")
             
-            # Get reserves
-            reserves = pair_contract.functions.getReserves().call()
+            # Get pool's version
+            version = None
+            v2_contract = w3.eth.contract(address=pair_address, abi=self.UNIV2_PAIR_ABI)
+            # Try V2
+            try:
+                v2_contract.functions.getReserves().call()
+                version = "UNI_V2"
+            except:
+                pass  # Not a V2 pair, continue to check V3
+
+            # Try V3
+            v3_contract = w3.eth.contract(address=pair_address, abi=self.UNIV3_POOL_ABI)
+            try:
+                v3_contract.functions.slot0().call()
+                version = "UNI_V3"
+            except:
+                pass  # Not a V3 pair either
+            
+            if version == None: version = "None"
             
             # Initialize token contracts
             token0_contract = w3.eth.contract(address=token0_address, abi=self.ERC20_ABI)
@@ -735,17 +776,16 @@ class ETH_Handler:
             
             return {
                 "pair_address": pair_address,
+                "version": version,
                 "token0": {
                     "address": token0_address,
                     "symbol": token0_symbol,
-                    "decimals": token0_decimals,
-                    "reserve": reserves[0] / 10**token0_decimals
+                    "decimals": token0_decimals
                 },
                 "token1": {
                     "address": token1_address,
                     "symbol": token1_symbol,
-                    "decimals": token1_decimals,
-                    "reserve": reserves[1] / 10**token1_decimals
+                    "decimals": token1_decimals
                 }
             }
             
@@ -775,7 +815,7 @@ class ETH_Handler:
             pair_address = Web3.to_checksum_address(pair_address)
             
             # Initialize pair contract
-            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            pair_contract = w3.eth.contract(address=pair_address, abi=self.UNIV2_ROUTER_ABI)
             
             # Get tokens in pair
             token0_address = pair_contract.functions.token0().call()
@@ -853,7 +893,7 @@ class ETH_Handler:
             token_address = Web3.to_checksum_address(token_address)
             
             # Initialize pair contract
-            pair_contract = w3.eth.contract(address=pair_address, abi=self.PAIR_ABI)
+            pair_contract = w3.eth.contract(address=pair_address, abi=self.UNIV2_ROUTER_ABI)
             
             # Get token addresses in pair
             token0_address = pair_contract.functions.token0().call()
