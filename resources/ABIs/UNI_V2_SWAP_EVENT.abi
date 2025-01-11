@@ -1,0 +1,15 @@
+[
+    {
+        "anonymous": false,
+        "inputs": [
+            {"indexed": true, "type": "address", "name": "sender"},
+            {"indexed": false, "type": "uint256", "name": "amount0In"},
+            {"indexed": false, "type": "uint256", "name": "amount1In"},
+            {"indexed": false, "type": "uint256", "name": "amount0Out"},
+            {"indexed": false, "type": "uint256", "name": "amount1Out"},
+            {"indexed": true, "type": "address", "name": "to"}
+        ],
+        "name": "Swap",
+        "type": "event"
+    }
+]    
