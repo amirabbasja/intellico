@@ -1,15 +1,15 @@
 from typing import Any, Dict, Optional, List
-import os, csv
 from dotenv import load_dotenv 
-import json
 import pandas as pd
-import requests
+from decimal import Decimal
 from requests.exceptions import RequestException
 from psycopg2 import Error
-import psycopg2
 from web3 import Web3
-import time
+import re, time, psycopg2, requests, json, os, csv
 from datetime import datetime
+import mplfinance as mpf
+from tqdm import tqdm
+import numpy as np
 
 class APIClient:
     def __init__(self, base_url: str, api_key: Optional[str] = None):
@@ -1011,3 +1011,749 @@ class ETH_Handler:
         else:
             # Not a conteract
             return None
+
+class SOL_Handler:
+    def __init__(self, alchemyApiKey:str):
+        """
+        This class is used to handle Ethereum blockchain interactions.
+        
+        Args:
+            alchemyApiKey (str): The alchemy api key
+        """
+        self.apiKey = alchemyApiKey
+
+    def getSwapDetails_v1(self, sig:str, verbose = False):
+        """
+        Gets the transaction's details and returns it as a dict. Uses alchemy's api.
+        
+        Args:
+            sig (str): The transaction's signature
+            verbose (bool): Weather to print the tx details. Default is False.
+        
+        Returns:
+            A dict with following keys: 
+            [timestamp,slot,fee,success,token_changes(Dict),program_ids,accounts_involved(List)]
+        """
+        base_url = f"https://solana-mainnet.g.alchemy.com/v2/{self.apiKey}"
+        
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json"
+        }
+        
+        payload = {
+            "id": 1,
+            "jsonrpc": "2.0",
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0
+                }
+            ]
+        }
+        
+        try:
+            response = requests.post(base_url, headers=headers, json=payload)
+            response.raise_for_status()
+            tx_data = response.json()
+            
+            if not tx_data.get("result"):
+                print(f"Transaction not found: {sig}")
+                return None
+                
+            # Extract relevant transaction data
+            tx = tx_data["result"]
+            meta = tx["meta"]
+            
+            # Get token balance changes with decimals
+            pre_balances = {}
+            post_balances = {}
+            
+            
+            
+            
+            
+            # Get user's main account
+            user_account = tx["transaction"]["message"]["accountKeys"][0]
+            account_indexes = {acc["pubkey"]: idx for idx, acc in enumerate(tx["transaction"]["message"]["accountKeys"])}
+
+            # Track native SOL changes
+            user_index = account_indexes.get(user_account["pubkey"])
+            pre_sol = meta["preBalances"][user_index] / 1e9
+            post_sol = meta["postBalances"][user_index] / 1e9
+            sol_change = post_sol - pre_sol
+
+            # Adjust for transaction fee
+            if sol_change < 0:
+                sol_change += meta["fee"] / 1e9
+
+            # Track token changes
+            swap_tokens = {
+                "in": None,
+                "out": None
+            }
+
+            # First check if native SOL was involved
+            if abs(sol_change) > 0.000001:  # Filter out dust
+                if sol_change > 0:
+                    swap_tokens["in"] = {
+                        "mint": "Native SOL",
+                        "amount": abs(sol_change),
+                        "decimals": 9
+                    }
+                else:
+                    swap_tokens["out"] = {
+                        "mint": "Native SOL",
+                        "amount": abs(sol_change),
+                        "decimals": 9
+                    }
+            
+            
+            
+            
+            
+            
+            
+            
+            
+            for balance in meta["preTokenBalances"]:
+                pre_balances[balance["mint"]] = {
+                    "amount": float(balance["uiTokenAmount"]["uiAmount"] or 0),
+                    "decimals": balance["uiTokenAmount"]["decimals"]
+                }
+                
+            for balance in meta["postTokenBalances"]:
+                post_balances[balance["mint"]] = {
+                    "amount": float(balance["uiTokenAmount"]["uiAmount"] or 0),
+                    "decimals": balance["uiTokenAmount"]["decimals"]
+                }
+            
+            # Calculate token transfers
+            token_changes = {}
+            all_mints = set(pre_balances.keys()) | set(post_balances.keys())
+            
+            for mint in all_mints:
+                pre_amount = pre_balances.get(mint, {"amount": 0})["amount"]
+                post_amount = post_balances.get(mint, {"amount": 0})["amount"]
+                decimals = pre_balances.get(mint, post_balances.get(mint))["decimals"]
+                
+                change = post_amount - pre_amount
+                if change != 0:
+                    token_changes[mint] = {
+                        "amount": change,
+                        "decimals": decimals
+                    }
+            
+            # Get program IDs involved
+            program_ids = set(ix.get("programId") for ix in 
+                            tx["transaction"]["message"]["instructions"])
+            
+            # Compile swap details
+            swap_details = {
+                "timestamp": tx["blockTime"],
+                "slot": tx["slot"],
+                "fee": meta["fee"] / 1e9,  # Convert fee from lamports to SOL
+                "success": not meta.get("err"),
+                "token_changes": token_changes,
+                "program_ids": list(program_ids),
+                "accounts_involved": tx["transaction"]["message"]["accountKeys"]
+            }
+            
+            if verbose:
+                    print("\nSwap Transaction Details:")
+                    print(f"Timestamp: {datetime.fromtimestamp(swap_details['timestamp'])}")
+                    print(f"Slot: {swap_details['slot']}")
+                    print(f"Fee: {swap_details['fee']:.9f} SOL")
+                    print(f"Success: {'Yes' if swap_details['success'] else 'No'}")
+                    
+                    print("\nToken Changes:")
+                    for mint, change in swap_details['token_changes'].items():
+                        direction = "IN" if change['amount'] > 0 else "OUT"
+                        print(f"  {direction}: {abs(change['amount'])} tokens "
+                            f"(Mint: {mint}, Decimals: {change['decimals']})")
+                    
+                    print("\nPrograms Involved:")
+                    for program_id in swap_details['program_ids']:
+                        print(f"  {program_id}")
+            
+            return swap_details
+            
+        except Exception as e:
+            print(f"Error fetching transaction: {str(e)}")
+            return None
+
+    def getSwapDetails_v2(self, sig:str, verbose = False):
+        """
+        Gets the transaction's details and returns it as a dict. Uses alchemy's api.
+        Accounts for native tokens as well.
+        
+        Args:
+            sig (str): The transaction's signature
+            verbose (bool): Weather to print the tx details. Default is False.
+        
+        Returns:
+            A dict with following keys: 
+            [timestamp,slot,fee,success,token_changes(Dict),program_ids,accounts_involved(List)]
+        """
+        
+        # Configuration
+        # API request setup
+        # try:
+        url = f"https://solana-mainnet.g.alchemy.com/v2/{self.apiKey}"
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json"
+        }
+        payload = {
+            "id": 1,
+            "jsonrpc": "2.0",
+            "method": "getTransaction",
+            "params": [
+                sig,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0
+                }
+            ]
+        }
+
+        # Make request
+        response = requests.post(url, headers=headers, json=payload)
+            
+        if not response.json().get("result"):
+            print(f"Transaction not found: {sig}")
+            print(response.text)
+            return None
+            
+        tx_data = response.json()["result"]
+        meta = tx_data["meta"]
+
+        # Get user's main account
+        user_account = tx_data["transaction"]["message"]["accountKeys"][0]
+        account_indexes = {acc["pubkey"]: idx for idx, acc in enumerate(tx_data["transaction"]["message"]["accountKeys"])}
+
+        # Track native SOL changes
+        user_index = account_indexes.get(user_account["pubkey"])
+        pre_sol = meta["preBalances"][user_index] / 1e9
+        post_sol = meta["postBalances"][user_index] / 1e9
+        sol_change = post_sol - pre_sol
+
+        # Adjust for transaction fee
+        if sol_change < 0:
+            sol_change += meta["fee"] / 1e9
+
+        # Track token changes
+        swap_tokens = {
+            "in": None,
+            "out": None
+        }
+
+        # First check if native SOL was involved
+        if abs(sol_change) > 0.000001:  # Filter out dust
+            if sol_change > 0:
+                swap_tokens["in"] = {
+                    "mint": "Native SOL",
+                    "amount": abs(sol_change),
+                    "decimals": 9
+                }
+            else:
+                swap_tokens["out"] = {
+                    "mint": "Native SOL",
+                    "amount": abs(sol_change),
+                    "decimals": 9
+                }
+
+        # Get token changes
+        all_token_balances = []
+
+        # Collect all pre-balances with account ownership
+        for balance in meta["preTokenBalances"]:
+            all_token_balances.append({
+                "mint": balance["mint"],
+                "owner": balance.get("owner"),
+                "time": "pre",
+                "account_index": balance["accountIndex"],
+                "amount": float(balance["uiTokenAmount"]["uiAmount"] or 0),
+                "decimals": balance["uiTokenAmount"]["decimals"]
+            })
+
+        # Collect all post-balances with account ownership
+        for balance in meta["postTokenBalances"]:
+            all_token_balances.append({
+                "mint": balance["mint"],
+                "owner": balance.get("owner"),
+                "time": "post",
+                "account_index": balance["accountIndex"],
+                "amount": float(balance["uiTokenAmount"]["uiAmount"] or 0),
+                "decimals": balance["uiTokenAmount"]["decimals"]
+            })
+
+        # Calculate changes for each mint
+        mint_changes = {}
+        for balance in all_token_balances:
+            mint = balance["mint"]
+            if mint not in mint_changes:
+                mint_changes[mint] = {
+                    "pre": {},
+                    "post": {},
+                    "decimals": balance["decimals"]
+                }
+            
+            time = balance["time"]
+            owner = balance["owner"]
+            if owner:
+                mint_changes[mint][time][owner] = mint_changes[mint][time].get(owner, 0) + balance["amount"]
+
+        # Analyze changes to find swap tokens
+        for mint, data in mint_changes.items():
+            pre_amount = data["pre"].get(user_account["pubkey"], 0)
+            post_amount = data["post"].get(user_account["pubkey"], 0)
+            change = post_amount - pre_amount
+            
+            if abs(change) > 0.000001:  # Filter out dust
+                if change > 0 and not swap_tokens["in"]:
+                    swap_tokens["in"] = {
+                        "mint": mint,
+                        "amount": abs(change),
+                        "decimals": data["decimals"]
+                    }
+                elif change < 0 and not swap_tokens["out"]:
+                    swap_tokens["out"] = {
+                        "mint": mint,
+                        "amount": abs(change),
+                        "decimals": data["decimals"]
+                    }
+
+        # Add block timestamp
+        swap_tokens["timestamp"] = tx_data['blockTime']
+        
+        if verbose:
+            # Print results
+            print(f"Timestamp: {datetime.fromtimestamp(tx_data['blockTime'])} ")
+            print(f"Transaction Fee: {meta['fee'] / 1e9} SOL")
+            print("\nSwap Details:")
+
+            if swap_tokens["out"]:
+                print("\nSwapped Out:")
+                print(f"Token: {swap_tokens['out']['mint']}")
+                print(f"Amount: {swap_tokens['out']['amount']}")
+                print(f"Decimals: {swap_tokens['out']['decimals']}")
+
+            if swap_tokens["in"]:
+                print("\nReceived:")
+                print(f"Token: {swap_tokens['in']['mint']}")
+                print(f"Amount: {swap_tokens['in']['amount']}")
+                print(f"Decimals: {swap_tokens['in']['decimals']}")
+        
+        return swap_tokens
+        
+        # except Exception as e:
+        #     print(f"Error fetching transactions: {str(e)}")
+        #     return None
+            
+class tokenCandlestick:
+    
+    def __init__(self, path:str, web3:Web3, targetChain: str, verbose:bool = False):
+        """
+        Initiates the class.
+        
+        Args:
+            path: The path to search for *.csv files.Each file name should have the 
+                following pattern: {startBlockNumber}-{endBlockNumber}.csv
+                Each row should have 3 columns. Namely, block, timestamp and datetime.
+            web3 (Web3): A web3 object to interact with blockchain.
+            targetChain (str): The name of the chain that is the pool is on
+            verbose (bool): Weather the app should describe what its doing ot user.
+        """
+        
+        # Get available block-timestamp pairs
+        # Get all files and sort them
+        # List to store the results
+        availableBlocks = []
+        
+        # Get all files in the directory and add it to a dataframe
+        try:
+            files = os.listdir(path)
+            
+            # Process each file
+            for filename in files:
+                # Check if it's a CSV file
+                if filename.endswith('.csv'):
+                    # Use regex to find numbers separated by dash
+                    matches = re.findall(r'(\d+)-(\d+)', filename)
+                    
+                    # If we found a match, convert strings to integers and add to our list
+                    if matches:
+                        # Take the first match (in case there are multiple)
+                        x, y = matches[0]
+                        availableBlocks.append({"start":int(x), "finish":int(y)})
+        
+        except FileNotFoundError:
+            raise Exception(f"Directory not found: {path}")
+        except Exception as e:
+            raise Exception(f"An error occurred: {str(e)}")
+        
+        if targetChain not in ["ETH"]:
+            raise Exception("Only ETH chain is supported at this time")
+        
+        # Set params
+        self.availableBlocks = pd.DataFrame(availableBlocks).sort_values("start")      
+        
+        with open("./resources/ABIs/UNI_V2_SWAP_EVENT.abi", 'r') as abi_file:
+            abi_content = abi_file.read()
+            self.UNI_V2_SWAP_EVENT_ABI = json.loads(abi_content)
+        with open("./resources/ABIs/UNI_V3_SWAP_EVENT.abi", 'r') as abi_file:
+            abi_content = abi_file.read()
+            self.UNI_V3_SWAP_EVENT_ABI = json.loads(abi_content)
+        
+        self.web3 = web3
+        self.verbose = verbose
+        self.targetChain = targetChain
+
+    def get_plot(self, df:pd.DataFrame, tf:str, info = None):
+        """
+        Plots the asset using matplotlib finance
+        
+        Args:
+            df (pd.Dataframe): A dataframe containing price and time of the trade. Time
+            of the trade should be in datetime and should be as the index of the 
+            dataframe
+            tf (str): The timeframe to aggregate the data for. (e.g. 1min, 1h, 1d, etc.) 
+            info (dict): Info about the chart. Acceptable keys: {title, } 
+        """
+        
+        ohlc = df["price"].resample(tf)
+
+        ohlc = pd.DataFrame({
+            'open': ohlc.first(),
+            'high': np.maximum(ohlc.max(),ohlc.first().shift(-1)),
+            'low': np.minimum(ohlc.min(),ohlc.first().shift(-1)),
+            'close': ohlc.first().shift(-1)  # First price of next period
+        }).dropna()
+
+        # Plot an SMA20
+        sma = ohlc['close'].rolling(window=20).mean()
+        apds = [
+            mpf.make_addplot(sma, color='orange', width=0.8) if 0 < sma.shape[0] else None
+            ]
+        apds = list(filter(None, apds))
+        
+        # Custom style
+        mc = mpf.make_marketcolors(
+            up='#26a69a',      # Green candle
+            down='#ef5350',    # Red candle
+            edge='inherit',    # Inherit the same color for edges
+            wick='inherit',    # Inherit the same color for wicks
+            volume='in',       # Volume bars use same colors as candles
+            ohlc='inherit'     # OHLC bars use same colors
+        )
+
+        # Create a custom style
+        style = mpf.make_mpf_style(
+            marketcolors=mc,
+            gridstyle='',          # Remove grid
+            y_on_right=True,       # Price axis on the right
+            rc={'font.size': 10},  # Base font size
+            base_mpf_style='nightclouds'  # Base on the nightclouds style
+        )
+
+        # Plot with more customization
+        mpf.plot(ohlc, 
+                type='candle',
+                title= info["title"] if info != None else 'Price Chart',
+                style=style,
+                volume=False,
+                figsize=(12, 8),      # Larger figure size
+                tight_layout=True,     # Tight layout
+                ylabel='Price',    
+                addplot=apds,    
+                datetime_format='%Y-%m-%d %H:%M',  # Date format
+                scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.8, 'bottom': 0.8})  # Add some padding
+
+    def process_transactions(self, transactions):
+        """
+        Process the raw transactions to a pandas dataframe. While block numbers are
+        returned when downloading the trades from blockchain, these trades only contain 
+        block number, and their timestamps are not denoted. To get each trade's 
+        timestamp we should have a pair of each block's timestamp (which we take when
+        making the object). After iterating through it, we take time stamp of each 
+        required block number and add it to a new column. 
+        
+        Args:
+            transactions (list): A list of trades, containing at leas two columns
+        
+        Returns:
+            A dataframe containing price of each trade, and its time (in datetime and 
+            as index)
+        """
+        df = pd.DataFrame(transactions)
+        df['timestamp'] = None
+        
+        # Get timestamp for each trade using its block number
+        for idx, row in self.availableBlocks.iterrows():
+            __df = pd.read_csv(f"./resources/ETH_block_data/{row[0]}-{row[1]}.csv")
+            __df = __df[__df["block"].isin(df.block_number)]
+            
+            if __df.shape[0] != 0:
+                # Update df1's target_column based on matching ids
+                df["timestamp"] = df["timestamp"].combine_first(df['block_number'].map(
+                    __df.set_index('block')['timestamp']
+                ))
+
+        # If there are any missing block timestamps, find them
+        __df = df[df["timestamp"].isna()]
+        print(f"{__df.shape[0]} block timestamps were not found in the provided files. Downloading them manually. This might take some time...")
+        for idx, row in tqdm(__df.iterrows(), total = __df.shape[0]):
+            df.loc[idx,"timestamp"] = self.web3.eth.get_block(row["block_number"])["timestamp"]
+
+        # Make timestamp in milliseconds. Cast price to float as well
+        df["timestamp"] = (df["timestamp"] * 1000).astype(np.int64)
+        df["price"] = df["price"].astype(float)
+        
+        # Take two columns (price and timestamp). Change timestamp to datetime and set it as index.
+        df = df[["price","timestamp"]]
+        df["datetime"] = pd.to_datetime(df["timestamp"],unit="ms")
+        df = df.set_index("datetime", drop = True)
+        
+        return df
+
+    def get_uniswap_pair_transactions(
+        self, 
+        pair_address: str, 
+        from_block: int, 
+        to_block: int, 
+        step: int, 
+        token0_decimals: int, 
+        token1_decimals: int, 
+        quote_token: int, 
+        pref_token: int = None,
+        min_tx_volume: float = None) -> List[dict]:
+        
+        """
+        Fetches and processes swap events from a DEX pair contract.
+        If the RPC node failed to send us the swap info (due to high size), it
+        halves the block range (repeats 10 times) until a valid response is 
+        received. 
+
+        Args:
+            pair_address (str): Address of the pair contract
+            from_block (int): Starting block number
+            to_block (int): Ending block number 
+            step (int): The step size when searching iteratively, starting from "from_block"
+                Set "None" to avoid dividing teh block range.
+            token0_decimals (int): Decimal points ofr token 0.
+            token2_decimals (int): Decimal points ofr token 2.
+            quote_token (int): The version of uniswap pool. Required for choosing correct ABI.
+                acceptable values: 2 or 3
+            pref_token (int): Preferred token to calculate price and volume related to them. 
+                Only 0, 1 and None are acceptable. If None passed, we have no preference and
+                return the price of selling (Token 0 sold for token 1 or vice versa)
+            min_tx_volume (float): Minimum transaction volume. The values below it will be 
+                disregarded. Set None for disregarding this filter. The size will be calculated 
+                in "pref_token". So for using this filter, you should pass this parameter as well.
+
+        Returns:
+            A list containing trades.
+        
+        Dependencies:
+            - Web3.py
+            - PAIR_ABI constant
+        """
+        # Check the requirements
+        if quote_token not in [2, 3]:
+            raise Exception("Pool version should be an integer. 2 or 3 are acceptable for now.")
+        
+        if pref_token not in [0, 1, None]:
+            raise Exception("Preferred token can only be 0 or 1. Pass None if you have no preference")
+        
+        if pref_token == None and min_tx_volume != None:
+            raise Exception("Minimum token volume will be calculated in pref_token. So you have to pass it as well")
+        
+        __dummyInt = self.web3.eth.block_number
+        if __dummyInt < to_block:
+            if self.verbose: print(f"Entered last block ({to_block}) is bigger than the most recent block on {self.targetChain} which is {__dummyInt}. Setting it end block to be {__dummyInt}")
+            to_block = __dummyInt
+        
+        # Initialize web3 object
+        w3 = self.web3
+        
+        # Create contract instance
+        pair_address = Web3.to_checksum_address(pair_address)
+        pair_contract = w3.eth.contract(
+            address=pair_address, 
+            abi = self.UNI_V2_SWAP_EVENT_ABI if quote_token == 2 else self.UNI_V3_SWAP_EVENT_ABI if quote_token == 3 else None)
+        
+        # If step is None, try to get the entire block range in one go
+        if step == None:
+            step = to_block - from_block
+        
+        # A list to save swap events
+        swap_events = []
+        
+        # Loop params
+        i = from_block
+        counter = 0 # For every acceptable response increases by one. Goes back to zero when faced big size error in alchemy.
+        __Stop = False # For stopping the loop
+        
+        # Get all swap events
+        while i <= to_block and not __Stop:
+            try:
+                # Double the step if four previous steps were successful
+                if counter == 3:
+                    counter = 0
+                    step = step * 2
+                    if self.verbose: print(f"++ Doubled the step size to {step}")
+                
+                # Set the start and end of current block batch to download
+                __from = i
+                __to = i + step if i + step <= to_block else to_block
+                
+                # Break, if start and end of the block range is the same
+                if __from == __to: break
+                
+                tmp = pair_contract.events.Swap.get_logs(
+                    from_block = __from,
+                    to_block = __to
+                )
+                swap_events += tmp
+                counter += 1
+                
+                if self.verbose: print(f"Downloaded {len(tmp)} trades from trades block {__from} to {__to} ({to_block - __from} remaining). ")
+                
+                __Stop = True if i == to_block else False
+                i = i + step if i + step <= to_block else to_block
+                
+            except Exception as e:
+                # Try 10 times, each time half the step size to see what works
+                for j in range(1,10):
+                    try:
+                        counter = 0
+                        _step = int(step / (2 ** j))
+                        if self.verbose: print(f"-- Halved each step to {_step}")
+                        
+                        __from = i
+                        __to = i + _step if i + _step <= to_block else to_block
+                        tmp = pair_contract.events.Swap.get_logs(
+                            from_block = __from,
+                            to_block = __to
+                        )
+                        swap_events += tmp
+                        
+                        if self.verbose: print(f"Downloaded {len(tmp)} trades from trades block {__from} to {__to} ({to_block - __from} remaining).")
+                        
+                        # If no errors found, update the step and go to previous searching scheme
+                        step = _step
+                        __Stop = True if i == to_block else False
+                        i = i + step if i + step <= to_block else to_block
+                        break
+                    except Exception as e:
+                        _errorText = str(e)
+                        __Stop = True
+                
+                # Exit getting the transactions
+                if j == 9:
+                    raise Exception(f"Facing errors. Halved the steps until {_step} but still getting the following error:\n\n {_errorText}")
+                
+            time.sleep(.1)
+            
+        transactions = []
+        
+        if self.verbose: print(f"Download finished. Aggregating {len(swap_events)} trades ...")
+        
+        # Process each swap event
+        for event in swap_events:
+            if quote_token == 2:
+                # Only for uniswap V2 transactions
+                amount0_in = Decimal(event['args']['amount0In']) / Decimal(10 ** token0_decimals)
+                amount1_in = Decimal(event['args']['amount1In']) / Decimal(10 ** token1_decimals)
+                amount0_out = Decimal(event['args']['amount0Out']) / Decimal(10 ** token0_decimals)
+                amount1_out = Decimal(event['args']['amount1Out']) / Decimal(10 ** token1_decimals)
+                
+                # Calculate effective amounts
+                amount0_delta = amount0_in - amount0_out
+                amount1_delta = amount1_in - amount1_out
+                
+                # Calculate price and volume
+                if pref_token == None:
+                    if amount0_delta > 0:  # Selling token0 for token1
+                        price = abs(amount1_delta / amount0_delta) if amount0_delta != 0 else 0
+                        volume = abs(amount0_delta)  # Assuming token1 is USD or stable
+                    else:  # Selling token1 for token0
+                        price = abs(amount0_delta / amount1_delta) if amount1_delta != 0 else 0
+                        volume = abs(amount1_delta)  # Assuming token1 is USD or stable
+                elif pref_token == 0:
+                    price = abs(amount0_delta / amount1_delta) if amount1_delta != 0 else 0
+                    volume = abs(amount0_delta)
+                elif pref_token == 1:
+                    price = abs(amount1_delta / amount0_delta) if amount0_delta != 0 else 0
+                    volume = abs(amount1_delta)
+                
+                # Filter minimum transaction values
+                if min_tx_volume != None:
+                    if volume < min_tx_volume:
+                        continue
+                
+                tx = {
+                    'transaction_hash': event['transactionHash'].hex(),
+                    'block_number': event['blockNumber'],
+                    'sender': event['args']['sender'],
+                    'recipient': event['args']['to'],
+                    'price': price,
+                    'volume': volume
+                }
+                
+                transactions.append(tx)
+            elif quote_token == 3:
+                # Only for uniswap V3 transactions
+                # # For uniswap V3, each transaction also contains the following info, however, we disregard them
+                # # price_from_sqrt, amounts0, amount1, tick, liquidity which are calculated below:
+                # sqrt_price_x96 = Decimal(event['args']['sqrtPriceX96'])
+                # price_from_sqrt = (sqrt_price_x96 / Decimal(2**96)) ** 2
+                
+                # Get amounts (note: V3 uses signed integers)
+                amount0 = Decimal(event['args']['amount0']) / Decimal(10 ** token0_decimals)
+                amount1 = Decimal(event['args']['amount1']) / Decimal(10 ** token1_decimals)
+
+                # Get price from sqrtPriceX96
+
+                if pref_token == None:
+                    # Determine which token was sold
+                    if amount0 > 0:  # Positive means token was received by the pool (sold by user)
+                        # Token0 was sold for Token1
+                        sold_amount = amount0
+                        bought_amount = -amount1  # Negative because it was received by user
+                        # token_path = "0->1"
+                        price = abs(amount1 / amount0) if amount0 != 0 else 0
+                    else:
+                        # Token1 was sold for Token0
+                        sold_amount = amount1
+                        bought_amount = -amount0  # Negative because it was received by user
+                        # token_path = "1->0"
+                        price = abs(amount0 / amount1) if amount1 != 0 else 0
+
+                    # Calculate volume in terms of sold token
+                    volume = float(abs(sold_amount))
+                elif pref_token == 0:
+                    price = abs(amount0 / amount1) if amount1 != 0 else 0
+                    volume = abs(amount0)
+                elif pref_token == 1:
+                    price = abs(amount1 / amount0) if amount0 != 0 else 0
+                    volume = abs(amount1)
+                
+                if price != 0:
+                    tx = {
+                        'transaction_hash': event['transactionHash'].hex(),
+                        'block_number': event['blockNumber'],
+                        'sender': event['args']['sender'],
+                        'recipient': event['args']['recipient'],
+                        "price": str(price),
+                        "volume": volume,
+                    }  
+                else:
+                    continue
+                
+                transactions.append(tx)                
+            
+        return transactions
