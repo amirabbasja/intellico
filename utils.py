@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional, List
 from dotenv import load_dotenv 
 import pandas as pd
+from time import sleep
 from decimal import Decimal
 from requests.exceptions import RequestException
 from psycopg2 import Error
@@ -8,9 +9,182 @@ from web3 import Web3
 import re, time, psycopg2, requests, json, os, csv
 from datetime import datetime
 import mplfinance as mpf
+import pandas as pd
 from tqdm import tqdm
 import numpy as np
 
+######## Stand alone general utility functions ########
+def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: datetime = None, endDate: datetime = None, limit: int = 1000, plotDetails: dict = {"plot":False, "type":"mplfinance"}) -> pd.DataFrame:
+    """
+    Get OHLCVs from coingecko public api. Charts prices are returned in USD.
+    
+    Args:
+        poolAddress (str): The address of the target pool
+        network (str): Name of the network that pool belongs to.
+        timeframe (str): The chart timeframe. available options:[1min, 5min, 15min, 1h,
+            4h, 12h, 1d]
+        startDate (datetime): Get candles before this date.
+        endDate (datetime): Get candles until this date back in time.
+        limit (int): Maximum number of candles to return in each batch. No more than 1000.
+        plotDetails (dict): The details for plotting the candlestick chart. Redundant if 
+            plot is False. Acceptable key-value pairs: 
+            {"plot":True or False} -> Plot the candlestick data
+            {"type":"mplfinance" or "type":"plotly"} -> What library to use for plotting
+    
+    Returns:
+        A pandas dataframe with columns ['Open', 'Close', 'High', 'Low', 'Volume'] and Date 
+        as its index.
+    """
+    
+    # Check parameters
+    if 1000 < limit:
+        raise Exception("Candle limit should be no more than 1000.")
+    
+    _tf = ""
+    _aggregate = ""
+    if timeframe.lower() in ["1min", "5min", "15min", "1h", "4h", "12h", "1d"]:
+        if "min" in timeframe.lower():
+            _tf = "minute"
+            _aggregate = timeframe.replace("min","")
+            if _aggregate not in ["1", "5", "15"]: raise Exception(f"Wrong number for timeframe {timeframe}")
+        elif "h" in timeframe.lower():
+            _tf = "hour"
+            _aggregate = timeframe.replace("h","")
+            if _aggregate not in ["1", "4", "12"]: raise Exception(f"Wrong number for timeframe {timeframe}")
+        elif "d" in timeframe.lower():
+            _tf = "day"
+            _aggregate = timeframe.replace("d","")
+            if _aggregate not in ["1"]: raise Exception(f"Wrong number for timeframe {timeframe}")
+    else:
+        raise Exception("Unacceptable timeframe passed. Acceptable values: [1min, 5min, 15min, 1h, 4h, 12h, 1d].")
+    
+    # Specifying network, desired pool, and time granularity
+    parameters = f'{network}/pools/{poolAddress}'
+    specificity = f'{1}'
+    
+    # Set the start and end of our search for candles
+    _startTimestamp = str(int(startDate.timestamp())) if startDate else str(int(time.time()))
+    _endTimestamp = None if not endDate else str(int(endDate.timestamp()))
+    
+    try:
+        # Start accumulating candles
+        candles = []
+        _stop = False
+        _batchHead = _startTimestamp
+        while not _stop:
+            # Make the request
+            url = f'https://api.geckoterminal.com/api/v2/networks/{parameters}/ohlcv/{_tf}' 
+            params = {
+                "limit":limit,
+                "aggregate":_aggregate,
+                "before_timestamp":_batchHead,
+            }
+            response = requests.get(url,params)
+            data = response.json()
+            meta = data["meta"]
+            
+            # Handling errors
+            if "errors" in data:
+                for err in data['errors']:
+                    print(f"Couldn't get klines. Error: {err['title']}\n")
+            
+            # Adding data to the candles list
+            data = data['data']['attributes']['ohlcv_list']
+            
+            if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
+                # Reached stopping point
+                for kline in data:
+                    # Only add candles that their timestamp is bigger than _endTimestamp
+                    if int(_endTimestamp) < int(kline[0]):
+                        candles.append(kline)
+                        
+                _stop = True
+            else:
+                # Continue fetching candles with updating next batch's head
+                candles += data
+                _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
+
+        df = pd.DataFrame(candles, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+        df['date'] = pd.to_datetime(df['date'], unit = 's')
+        df.set_index('date', inplace = True)
+        df = df.sort_index()
+        
+        # Only plot if the user wants to
+        if plotDetails["plot"]:
+            if plotDetails["type"].lower() == "mplfinance":
+                ohlc = df
+
+                sma = ohlc['close'].rolling(window=20).mean()
+                apds = [
+                    mpf.make_addplot(sma, color='orange', width=0.8) if 0 < sma.shape[0] else None
+                    ]
+                apds = list(filter(None, apds))
+                
+                # Custom style
+                mc = mpf.make_marketcolors(
+                    up='#26a69a',      # Green candle
+                    down='#ef5350',    # Red candle
+                    edge='inherit',    # Inherit the same color for edges
+                    wick='inherit',    # Inherit the same color for wicks
+                    volume='in',       # Volume bars use same colors as candles
+                    ohlc='inherit'     # OHLC bars use same colors
+                )
+
+                # Create a custom style
+                style = mpf.make_mpf_style(
+                    marketcolors=mc,
+                    gridstyle='',          # Remove grid
+                    y_on_right=True,       # Price axis on the right
+                    rc={'font.size': 10},  # Base font size
+                    base_mpf_style='nightclouds'  # Base on the nightclouds style
+                )
+
+                # Plot with more customization
+                mpf.plot(ohlc, 
+                        type='candle',
+                        title= f"{meta['base']['symbol']}/{'USD'}",
+                        style=style,
+                        volume=False,
+                        figsize=(12, 8),      # Larger figure size
+                        tight_layout=True,     # Tight layout
+                        ylabel='Price',    
+                        addplot=apds,    
+                        datetime_format='%Y-%m-%d %H:%M',  # Date format
+                        scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.8, 'bottom': 0.8})  # Add some padding
+            elif plotDetails["type"].lower() == "plotly":
+                import plotly.graph_objects as go
+
+                # df["date"] = df.index
+                fig = go.Figure(data=[go.Candlestick(x=df.index,
+                                open=df['open'],
+                                high=df['high'],
+                                low=df['low'],
+                                close=df['close'],
+                                increasing_line_color='#26A69A',    # green
+                                decreasing_line_color='#EF5350',    # red
+                                )])
+
+                fig.update_layout(title='Candlestick Chart',
+                                yaxis_title='Price',
+                                xaxis_title='Date',
+                                height=800,                        # height in pixels
+                                paper_bgcolor='black',             # background color
+                                plot_bgcolor='black',              # plot area color
+                                font=dict(color='white'),          # text color
+                                xaxis=dict(showgrid=False),        # remove x-axis grid
+                                yaxis=dict(showgrid=False))        # remove y-axis grid
+
+                fig.show()
+            else:
+                # Handle exceptions
+                raise Exception(f"Error plotting the chart. Only mplfinance or plotly are acceptable for now. You entered: {plotDetails['type']}")
+        
+        return df
+    except Exception as ex:
+        print(f"Error while getting kline data: {str(ex)}")
+
+
+######## Utility classes ########
 class APIClient:
     def __init__(self, base_url: str, api_key: Optional[str] = None):
         """
@@ -1021,6 +1195,7 @@ class SOL_Handler:
             alchemyApiKey (str): The alchemy api key
         """
         self.apiKey = alchemyApiKey
+        self.baseURL = f"https://solana-mainnet.g.alchemy.com/v2/{alchemyApiKey}"
 
     def getSwapDetails_v1(self, sig:str, verbose = False):
         """
@@ -1352,19 +1527,157 @@ class SOL_Handler:
         # except Exception as e:
         #     print(f"Error fetching transactions: {str(e)}")
         #     return None
+
+    def getPoolTrades(self, poolAddress, limit=1000, searchStart = None, searchEnd = None, verbose = False):
+        """
+        Fetches recent trades for a pool. Uses alchemy's API.
+        
+        Args:
+            poolAddress (str): The pool's address.
+            limit (int): Maximum number of transactions to get in each batch.
+            searchStart (str): The signature to start getting trades from. The
+                search will continue back in time from this point on. Set None
+                to start from the most recent trade.
+            searchEnd (dict): When to end the search. It is a dictionary. Multiple 
+                key value pairs are acceptable. Acceptable keys are as follows:
+                "signature", "timestamp" (in seconds) and "slot".
+            verbose (bool): True if you want the app to explain what its doing.
             
-class tokenCandlestick:
+        Returns:
+            A dist of trades. Each trade is a dictionary with keys blockTime, 
+            slot and signature. 
+        """
+        _searchEndIsSet = False
+        _searchPropertyKey = [] # What to search for stopping the loop (If any)
+        # Process the arguments
+        if searchEnd != None:
+            if 3 < len(searchEnd):
+                raise Exception("Maximum of 3 key-value pair is acceptable for searchEnd argument")
+            
+            for key in searchEnd.keys():
+                if key not in ["signature", "timestamp", "slot"]:
+                    raise Exception("The searchEnd parameter key should be one of the following: signature, timestamp or slot")
+                else:
+                    _searchEndIsSet = True
+                    _searchPropertyKey.append(key)
+        
+        if 1000 < limit:
+            raise Exception("Limit can not be more than 1000.")
+        
+        
+        # Loop parameters
+        trades = [] # Save the trades
+        _stop = False # True when we want the loop to break
+        errCount = 0 # Number of errors in requesting a batch
+        nextBatchStart = searchStart # The signature to start the transaction search
+        
+        # Loop will break when:
+        # 1. errCount is bigger than 10
+        # 2. searchEnd parameter is found in batch
+        # 3. If searchEnd is None, only one batch will be returned
+        if verbose: print(f"Starting to fetch trades for pool {poolAddress}")
+        while not _stop:
+            if verbose: print("getting a new batch ...")
+            
+            batch = []
+            errCount = 0
+            
+            try:
+                # Get recent signatures for the pool
+                headers = {
+                    "accept": "application/json",
+                    "content-type": "application/json"
+                }
+                
+                payload = {
+                    "id": 1,
+                    "jsonrpc": "2.0",
+                    "method": "getSignaturesForAddress",
+                    "params": [
+                        poolAddress,
+                        {
+                            "limit": limit,
+                            "before": nextBatchStart,
+                            "until": None
+                        }
+                    ]
+                }
+                
+                response = requests.post(
+                    self.baseURL,
+                    headers=headers,
+                    json=payload
+                )
+                
+                # Raise errors if no responses are returned
+                if response.status_code != 200 or not response.json()["result"]:
+                    raise Exception(f"API request failed: {response.status_code} - {response.text}")
+                
+                signatures = response.json()
+                
+                for sigInfo in signatures["result"]:
+                    # Only save transactions without any errors
+                    if sigInfo["err"] == None:
+                        batch.append({
+                            "blockTime": sigInfo["blockTime"],
+                            "slot": sigInfo["slot"],
+                            "signature": sigInfo["signature"]
+                        })
+                        
+                        # Check stop statues
+                        if "timestamp" in _searchPropertyKey:
+                            if int(sigInfo["blockTime"]) < searchEnd["timestamp"]:
+                                if verbose: print(f"Reached timestamp {searchEnd['timestamp']}. Breaking...")
+                                _stop = True
+                                break
+                        
+                        if "slot" in _searchPropertyKey:
+                            if int(sigInfo["slot"]) < searchEnd["slot"]:
+                                if verbose: print(f"Reached slot {searchEnd['slot']}. Breaking...")
+                                _stop = True
+                                break
+                        
+                        if "signature" in _searchPropertyKey:
+                            if sigInfo["signature"] == searchEnd["signature"]:
+                                if verbose: print(f"Reached signature {searchEnd['signature']}. Breaking...")
+                                _stop = True
+                                break
+                        
+                        # If not stopping, update the next batch's starting point
+                        nextBatchStart = sigInfo["signature"]
+                
+                # If no end is specified, only get 1 batch
+                if searchEnd == None:
+                    _stop = True
+                
+                # Add this batch's trades to main list
+                trades += batch
+                
+            except Exception as e:
+                print(f"Error fetching trades: {str(e)}. Retrying for the {errCount} time ...")
+                sleep(5)
+                
+                if errCount == 10:
+                    print("Retried 10 times. Exiting.")
+                    return trades
+                
+                errCount += 1
+
+        return trades
+
+class EVMTokenCandlestick:
     
     def __init__(self, path:str, web3:Web3, targetChain: str, verbose:bool = False):
         """
-        Initiates the class.
+        The class for getting EVM chains pool trades and plotting their candlestick 
+        charts. Coded for uniswap pools. Should add ABIs for other pool integrations. 
         
         Args:
-            path: The path to search for *.csv files.Each file name should have the 
+            path: The path to search for *.csv files. Each file name should have the 
                 following pattern: {startBlockNumber}-{endBlockNumber}.csv
                 Each row should have 3 columns. Namely, block, timestamp and datetime.
             web3 (Web3): A web3 object to interact with blockchain.
-            targetChain (str): The name of the chain that is the pool is on
+            targetChain (str): The name of the chain that the pool is on
             verbose (bool): Weather the app should describe what its doing ot user.
         """
         
@@ -1527,7 +1840,7 @@ class tokenCandlestick:
         step: int, 
         token0_decimals: int, 
         token1_decimals: int, 
-        quote_token: int, 
+        pool_version: int, 
         pref_token: int = None,
         min_tx_volume: float = None) -> List[dict]:
         
@@ -1545,7 +1858,7 @@ class tokenCandlestick:
                 Set "None" to avoid dividing teh block range.
             token0_decimals (int): Decimal points ofr token 0.
             token2_decimals (int): Decimal points ofr token 2.
-            quote_token (int): The version of uniswap pool. Required for choosing correct ABI.
+            pool_version (int): The version of uniswap pool. Required for choosing correct ABI.
                 acceptable values: 2 or 3
             pref_token (int): Preferred token to calculate price and volume related to them. 
                 Only 0, 1 and None are acceptable. If None passed, we have no preference and
@@ -1562,7 +1875,7 @@ class tokenCandlestick:
             - PAIR_ABI constant
         """
         # Check the requirements
-        if quote_token not in [2, 3]:
+        if pool_version not in [2, 3]:
             raise Exception("Pool version should be an integer. 2 or 3 are acceptable for now.")
         
         if pref_token not in [0, 1, None]:
@@ -1583,7 +1896,7 @@ class tokenCandlestick:
         pair_address = Web3.to_checksum_address(pair_address)
         pair_contract = w3.eth.contract(
             address=pair_address, 
-            abi = self.UNI_V2_SWAP_EVENT_ABI if quote_token == 2 else self.UNI_V3_SWAP_EVENT_ABI if quote_token == 3 else None)
+            abi = self.UNI_V2_SWAP_EVENT_ABI if pool_version == 2 else self.UNI_V3_SWAP_EVENT_ABI if pool_version == 3 else None)
         
         # If step is None, try to get the entire block range in one go
         if step == None:
@@ -1664,7 +1977,7 @@ class tokenCandlestick:
         
         # Process each swap event
         for event in swap_events:
-            if quote_token == 2:
+            if pool_version == 2:
                 # Only for uniswap V2 transactions
                 amount0_in = Decimal(event['args']['amount0In']) / Decimal(10 ** token0_decimals)
                 amount1_in = Decimal(event['args']['amount1In']) / Decimal(10 ** token1_decimals)
@@ -1705,7 +2018,7 @@ class tokenCandlestick:
                 }
                 
                 transactions.append(tx)
-            elif quote_token == 3:
+            elif pool_version == 3:
                 # Only for uniswap V3 transactions
                 # # For uniswap V3, each transaction also contains the following info, however, we disregard them
                 # # price_from_sqrt, amounts0, amount1, tick, liquidity which are calculated below:
