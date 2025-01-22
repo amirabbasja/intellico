@@ -14,7 +14,7 @@ from tqdm import tqdm
 import numpy as np
 
 ######## Stand alone general utility functions ########
-def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: datetime = None, endDate: datetime = None, limit: int = 1000, plotDetails: dict = {"plot":False, "type":"mplfinance"}) -> pd.DataFrame:
+def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: datetime = None, endDate: datetime = None, limit: int = 1000, plotDetails: dict = {"plot":False, "type":"mplfinance"}, verbose = False) -> pd.DataFrame:
     """
     Get OHLCVs from coingecko public api. Charts prices are returned in USD.
     
@@ -30,6 +30,7 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
             plot is False. Acceptable key-value pairs: 
             {"plot":True or False} -> Plot the candlestick data
             {"type":"mplfinance" or "type":"plotly"} -> What library to use for plotting
+        verbose (bool): Pass true to see what app is doing.
     
     Returns:
         A pandas dataframe with columns ['Open', 'Close', 'High', 'Low', 'Volume'] and Date 
@@ -71,6 +72,7 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
         candles = []
         _stop = False
         _batchHead = _startTimestamp
+        _errorCounter = 0
         while not _stop:
             # Make the request
             url = f'https://api.geckoterminal.com/api/v2/networks/{parameters}/ohlcv/{_tf}' 
@@ -79,30 +81,48 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                 "aggregate":_aggregate,
                 "before_timestamp":_batchHead,
             }
-            response = requests.get(url,params)
-            data = response.json()
-            meta = data["meta"]
             
-            # Handling errors
-            if "errors" in data:
-                for err in data['errors']:
-                    print(f"Couldn't get klines. Error: {err['title']}\n")
-            
-            # Adding data to the candles list
-            data = data['data']['attributes']['ohlcv_list']
-            
-            if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
-                # Reached stopping point
-                for kline in data:
-                    # Only add candles that their timestamp is bigger than _endTimestamp
-                    if int(_endTimestamp) < int(kline[0]):
-                        candles.append(kline)
-                        
-                _stop = True
-            else:
-                # Continue fetching candles with updating next batch's head
-                candles += data
-                _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
+            # Handle rate limit
+            try:
+                if verbose: print(f"Getting a new batch from {_batchHead} with {limit} candles.")
+                response = requests.get(url,params)
+                data = response.json()
+                meta = data["meta"]
+                
+                # If we have a key named "meta", means that we are not rate limited
+                _errorCounter = 0
+                
+                # Handling errors
+                if "errors" in data:
+                    for err in data['errors']:
+                        print(f"Couldn't get klines. Error: {err['title']}\n")
+                
+                # Adding data to the candles list
+                data = data['data']['attributes']['ohlcv_list']
+                
+                if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
+                    # Reached stopping point
+                    for kline in data:
+                        # Only add candles that their timestamp is bigger than _endTimestamp
+                        if int(_endTimestamp) < int(kline[0]):
+                            candles.append(kline)
+                            
+                    _stop = True
+                else:
+                    # Continue fetching candles with updating next batch's head
+                    candles += data
+                    _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
+            except:
+                _errorCounter += 1
+                if _errorCounter == 6: 
+                    print("Waited for 3 minutes but still rate limited. breaking")
+                    return None
+                
+                if "rate limit" in response.text.lower():
+                    if verbose: print("Rate limited. Waiting...")
+                    sleep(30)
+                else:
+                    return None
 
         df = pd.DataFrame(candles, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
         df['date'] = pd.to_datetime(df['date'], unit = 's')
@@ -181,7 +201,7 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
         
         return df
     except Exception as ex:
-        print(f"Error while getting kline data: {str(ex)}")
+        print(f"Error while getting kline data: {str(ex)} | Response text: {response.text}")
 
 
 ######## Utility classes ########
