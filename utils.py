@@ -100,19 +100,25 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                 # Adding data to the candles list
                 data = data['data']['attributes']['ohlcv_list']
                 
-                if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
-                    # Reached stopping point
-                    for kline in data:
-                        # Only add candles that their timestamp is bigger than _endTimestamp
-                        if int(_endTimestamp) < int(kline[0]):
-                            candles.append(kline)
-                            
-                    _stop = True
+                # SOme times there are no data, we handle that here
+                if 0 < len(data):
+                    if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
+                        # Reached stopping point
+                        for kline in data:
+                            # Only add candles that their timestamp is bigger than _endTimestamp
+                            if int(_endTimestamp) < int(kline[0]):
+                                candles.append(kline)
+                                
+                        _stop = True
+                        if verbose: print("End date reached. Stopping...")
+                    else:
+                        # Continue fetching candles with updating next batch's head
+                        candles += data
+                        _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
                 else:
-                    # Continue fetching candles with updating next batch's head
-                    candles += data
-                    _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
-            except:
+                    _stop = True
+                
+            except Exception as ex:
                 _errorCounter += 1
                 if _errorCounter == 6: 
                     print("Waited for 3 minutes but still rate limited. breaking")
