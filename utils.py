@@ -101,7 +101,6 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                     
                     # Adding data to the candles list
                     data = data['data']['attributes']['ohlcv_list']
-                    
                     # SOme times there are no data, we handle that here
                     if 0 < len(data):
                         if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
@@ -145,11 +144,21 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
             if plotDetails["type"].lower() == "mplfinance":
                 ohlc = df
 
-                sma = ohlc['close'].rolling(window=20).mean()
-                apds = [
-                    mpf.make_addplot(sma, color='orange', width=0.8) if 0 < sma.shape[0] else None
-                    ]
-                apds = list(filter(None, apds))
+                # plotting arguments
+                plotKwArgs = {}
+                
+                if "savefig" in plotDetails.keys():
+                    plotKwArgs["savefig"] = os.path.join(plotDetails["savefig"], f"{meta['base']['symbol']}_{'USD'}_{poolAddress}.png")
+                    
+                smaWindow = 20
+                if smaWindow + 1 < df.shape[0]:
+                    sma = ohlc['close'].rolling(window=smaWindow).mean()
+                    apds = [
+                        mpf.make_addplot(sma, color='orange', width=0.8) if 0 < sma.shape[0] else None
+                        ]
+                    apds = list(filter(None, apds))
+                    plotKwArgs["savefig"] = apds
+                
                 
                 # Custom style
                 mc = mpf.make_marketcolors(
@@ -169,12 +178,6 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                     rc={'font.size': 10},  # Base font size
                     base_mpf_style='nightclouds'  # Base on the nightclouds style
                 )
-
-                # plotting arguments
-                plotKwArgs = {}
-                
-                if "savefig" in plotDetails.keys():
-                    plotKwArgs["savefig"] = os.path.join(plotDetails["savefig"], f"{meta['base']['symbol']}_{'USD'}_{poolAddress}.png")
                 
                 # Plot with more customization
                 mpf.plot(ohlc, 
@@ -185,8 +188,7 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                         figsize=(16, 8),      # Larger figure size
                         tight_layout=True,     # Tight layout
                         ylabel='Price',
-                        yscale = "log",
-                        addplot=apds,   
+                        yscale = "log", 
                         datetime_format='%Y-%m-%d %H:%M',  # Date format
                         scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.8, 'bottom': 0.8},
                         **plotKwArgs)
