@@ -30,6 +30,7 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
             plot is False. Acceptable key-value pairs: 
             {"plot":True or False} -> Plot the candlestick data
             {"type":"mplfinance" or "type":"plotly"} -> What library to use for plotting
+            {"savefig":"path to where you want to save"} -> Save the plot to a file
         verbose (bool): Pass true to see what app is doing.
     
     Returns:
@@ -87,35 +88,39 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                 if verbose: print(f"Getting a new batch from {_batchHead} with {limit} candles.")
                 response = requests.get(url,params)
                 data = response.json()
-                meta = data["meta"]
                 
-                # If we have a key named "meta", means that we are not rate limited
-                _errorCounter = 0
-                
-                # Handling errors
-                if "errors" in data:
-                    for err in data['errors']:
-                        print(f"Couldn't get klines. Error: {err['title']}\n")
-                
-                # Adding data to the candles list
-                data = data['data']['attributes']['ohlcv_list']
-                
-                # SOme times there are no data, we handle that here
-                if 0 < len(data):
-                    if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
-                        # Reached stopping point
-                        for kline in data:
-                            # Only add candles that their timestamp is bigger than _endTimestamp
-                            if int(_endTimestamp) < int(kline[0]):
-                                candles.append(kline)
-                                
-                        _stop = True
-                        if verbose: print("End date reached. Stopping...")
+                if "errors" not  in data.keys():
+                    meta = data["meta"]
+                    # If we have a key named "meta", means that we are not rate limited
+                    _errorCounter = 0
+                    
+                    # Handling errors
+                    if "errors" in data:
+                        for err in data['errors']:
+                            print(f"Couldn't get klines. Error: {err['title']}\n")
+                    
+                    # Adding data to the candles list
+                    data = data['data']['attributes']['ohlcv_list']
+                    
+                    # SOme times there are no data, we handle that here
+                    if 0 < len(data):
+                        if min(int(data[0][0]), int(data[-1][0])) <= int(_endTimestamp):
+                            # Reached stopping point
+                            for kline in data:
+                                # Only add candles that their timestamp is bigger than _endTimestamp
+                                if int(_endTimestamp) < int(kline[0]):
+                                    candles.append(kline)
+                                    
+                            _stop = True
+                            if verbose: print("End date reached. Stopping...")
+                        else:
+                            # Continue fetching candles with updating next batch's head
+                            candles += data
+                            _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
                     else:
-                        # Continue fetching candles with updating next batch's head
-                        candles += data
-                        _batchHead = str(min(int(data[0][0]), int(data[-1][0])))
+                        _stop = True
                 else:
+                    if verbose: print("Request returned an error: ", data["errors"])
                     _stop = True
                 
             except Exception as ex:
@@ -165,18 +170,27 @@ def coinGeckoCandles(poolAddress: str, network: str, timeframe: str, startDate: 
                     base_mpf_style='nightclouds'  # Base on the nightclouds style
                 )
 
+                # plotting arguments
+                plotKwArgs = {}
+                
+                if "savefig" in plotDetails.keys():
+                    plotKwArgs["savefig"] = os.path.join(plotDetails["savefig"], f"{meta['base']['symbol']}_{'USD'}_{poolAddress}.png")
+                
                 # Plot with more customization
                 mpf.plot(ohlc, 
                         type='candle',
                         title= f"{meta['base']['symbol']}/{'USD'}",
                         style=style,
                         volume=False,
-                        figsize=(12, 8),      # Larger figure size
+                        figsize=(16, 8),      # Larger figure size
                         tight_layout=True,     # Tight layout
-                        ylabel='Price',    
-                        addplot=apds,    
+                        ylabel='Price',
+                        yscale = "log",
+                        addplot=apds,   
                         datetime_format='%Y-%m-%d %H:%M',  # Date format
-                        scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.8, 'bottom': 0.8})  # Add some padding
+                        scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.8, 'bottom': 0.8},
+                        **plotKwArgs)
+                
             elif plotDetails["type"].lower() == "plotly":
                 import plotly.graph_objects as go
 
